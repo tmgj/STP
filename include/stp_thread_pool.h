@@ -95,11 +95,10 @@ public:
         requires std::invocable<F, Args...>
     void execute(F&& f, Args&&... args)
     {
-        enqueue(std::move_only_function<void()>(
-            [f  = std::forward<F>(f),
-             ...a = std::forward<Args>(args)]() mutable {
-                std::invoke(std::move(f), std::move(a)...);
-            }));
+        enqueue([f  = std::forward<F>(f),
+                 ...a = std::forward<Args>(args)]() mutable {
+            std::invoke(std::move(f), std::move(a)...);
+        });
     }
 
     template <typename F, typename... Args>
@@ -113,7 +112,7 @@ public:
                 return std::invoke(std::move(f), std::move(a)...);
             });
         auto future = pt.get_future();
-        enqueue(std::move_only_function<void()>(std::move(pt)));
+        enqueue(std::move(pt));
         return future;
     }
 
@@ -396,7 +395,6 @@ private:
             bool found = false;
             for (int spin = 0; spin < 64; ++spin)
             {
-                // ::_mm_pause();
                 cpu_pause();
                 if (try_pop_or_steal(id, task))
                 {

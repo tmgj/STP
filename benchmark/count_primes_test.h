@@ -51,7 +51,8 @@ public:
             UseSubmit ? "submit" : "fire_and_forget"); 
     }
 
-    void run(TPoolHandle& pool) override {
+    void run(TPoolHandle& pool) override
+    {
         if constexpr (UseSubmit)
         {
             std::vector<std::future<bool>> futs_;
@@ -74,15 +75,21 @@ public:
         }
         else
         {
+            std::vector<ShardedCounter> shards(kShardCount);
             std::latch done_latch(data_.size());
-            std::atomic<size_t> cnt{0};
 
             for (auto n : data_)
             {
-                pool.fire_and_forget([n, &done_latch, &cnt]() {
+                pool.fire_and_forget([n, &done_latch, &shards]() {
+                    static std::atomic<size_t> global_tls_idx{0};
+                    // thread_local, only init once
+                    thread_local size_t my_idx = 
+                        global_tls_idx.fetch_add(1, std::memory_order_relaxed);
                     if (is_prime<T>(n))
                     {
-                        cnt.fetch_add(1, std::memory_order_relaxed);
+                        // Use bitwise AND (&) instead of modulo (%)
+                        shards[my_idx & kShardMask].val.fetch_add(
+                            1, std::memory_order_relaxed);
                     }
                     done_latch.count_down();
                 });
@@ -90,7 +97,12 @@ public:
             
             done_latch.wait();
             
-            if (expected_count_ != cnt.load(std::memory_order_relaxed))
+            size_t total = 0;
+            for (auto& s : shards)
+            {
+                total += s.val.load(std::memory_order_relaxed);
+            }
+            if (expected_count_ != total)
             {
                 this->all_correct_ = false;
             }
@@ -100,4 +112,26 @@ private:
     std::vector<T> data_;
     size_t expected_count_ = 0;
     size_t n_ = 0;
+    // Round up the number of shards to the next power of two 
+    // to allow using bitwise AND (&) instead of modulo (%)
+    static inline const size_t kShardCount = []() {
+        size_t cores = std::thread::hardware_concurrency();
+        if (0 == cores)
+        {
+            cores = 8;
+        }
+        size_t power_of_two = 1;
+        while (power_of_two < cores)
+        {
+            power_of_two <<= 1;
+        }
+        return power_of_two; 
+    }();
+    static inline const size_t kShardMask = kShardCount - 1;
+    // Use a sharded accumulator to reduce lock contention.
+    // Align to 64 bytes to avoid false sharing.
+    struct alignas(64) ShardedCounter
+    {
+        std::atomic<size_t> val{0};
+    };
 };
